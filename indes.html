@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D 极速陀螺仪滚球</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: Arial, sans-serif;
+            touch-action: none;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #fff;
+            font-size: 18px;
+            text-shadow: 0 0 5px #000;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #btn-start {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 15px 30px;
+            font-size: 20px;
+            color: #fff;
+            background: #008cba;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0,140,186,0.5);
+            z-index: 20;
+        }
+    </style>
+    <!-- 引入 Three.js 库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui">
+        <div>分数: <span id="score">0</span></div>
+        <div>速度: <span id="speed">0</span> km/h</div>
+    </div>
+
+    <button id="btn-start">开始游戏 (开启陀螺仪)</button>
+
+    <script>
+        let scene, camera, renderer;
+        let player, floor;
+        let obstacles = [];
+        let score = 0;
+        let speed = 0.5; // 基础向前速度
+        let tiltX = 0, tiltY = 0;
+        let gameActive = false;
+
+        // 初始化场景与 3D 元素
+        function init() {
+            // 1. 创建场景
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.015);
+
+            // 2. 创建相机
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            // 3. 创建渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // 4. 添加灯光
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0x00ffff, 0.8);
+            dirLight.position.set(0, 20, 10);
+            scene.add(dirLight);
+
+            // 5. 创建主角球体 (陀螺)
+            const playerGeo = new THREE.SphereGeometry(1, 32, 32);
+            const playerMat = new THREE.MeshStandardMaterial({ 
+                color: 0x00ffcc, 
+                wireframe: true,
+                emissive: 0x004444 
+            });
+            player = new THREE.Mesh(playerGeo, playerMat);
+            player.position.set(0, 1, 0);
+            scene.add(player);
+
+            // 6. 创建地面 (赛道)
+            const floorGeo = new THREE.PlaneGeometry(30, 2000);
+            const floorMat = new THREE.MeshStandardMaterial({ color: 0x111122, roughness: 0.8 });
+            floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.z = -900;
+            scene.add(floor);
+
+            // 7. 生成障碍物
+            createObstacles();
+
+            // 8. 窗口调整响应
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        // 随机生成障碍物
+        function createObstacles() {
+            const obsGeo = new THREE.BoxGeometry(2, 2, 2);
+            const obsMat = new THREE.MeshStandardMaterial({ color: 0xff0055, emissive: 0x330011 });
+
+            for (let i = 0; i < 100; i++) {
+                const obs = new THREE.Mesh(obsGeo, obsMat);
+                obs.position.x = (Math.random() - 0.5) * 26;
+                obs.position.y = 1;
+                obs.position.z = -50 - i * 20; // 沿路径分布
+                scene.add(obs);
+                obstacles.push(obs);
+            }
+        }
+
+        // 绑定陀螺仪控制
+        function handleOrientation(event) {
+            // gamma 是左右倾斜 (-90 到 90)
+            // beta 是前后倾斜 (-180 到 180)
+            const x = event.gamma; 
+            const y = event.beta;
+
+            if (x !== null) {
+                // 限制并归一化倾斜角度
+                tiltX = Math.min(Math.max(x, -30), 30) / 30; // -1 到 1
+            }
+        }
+
+        // 请求陀螺仪权限 (针对 iOS 13+)
+        function requestGyroPermission() {
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission()
+                    .then(response => {
+                        if (response === 'granted') {
+                            window.addEventListener('deviceorientation', handleOrientation);
+                            startGame();
+                        } else {
+                            alert('需要陀螺仪权限才能进行游戏！');
+                        }
+                    })
+                    .catch(console.error);
+            } else {
+                // 安卓或非 iOS 13+ 设备的常规监听
+                window.addEventListener('deviceorientation', handleOrientation);
+                startGame();
+            }
+        }
+
+        function startGame() {
+            document.getElementById('btn-start').style.display = 'none';
+            gameActive = true;
+            animate();
+        }
+
+        // 碰撞检测
+        function checkCollisions() {
+            const playerBox = new THREE.Box3().setFromObject(player);
+
+            for (let i = 0; i < obstacles.length; i++) {
+                const obsBox = new THREE.Box3().setFromObject(obstacles[i]);
+                if (playerBox.intersectsBox(obsBox)) {
+                    // 撞到障碍物，重置游戏
+                    alert(`游戏结束！最终得分: ${Math.floor(score)}`);
+                    resetGame();
+                    break;
+                }
+            }
+        }
+
+        // 重置游戏状态
+        function resetGame() {
+            player.position.set(0, 1, 0);
+            score = 0;
+            speed = 0.5;
+            // 重新排列障碍物
+            obstacles.forEach((obs, index) => {
+                obs.position.x = (Math.random() - 0.5) * 26;
+                obs.position.z = -50 - index * 20;
+            });
+        }
+
+        // 窗口大小适配
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // 游戏主循环
+        function animate() {
+            if (!gameActive) return;
+
+            requestAnimationFrame(animate);
+
+            // 1. 玩家移动控制 (根据手机倾斜程度移动 X 轴)
+            player.position.x += tiltX * 0.4;
+            // 限制玩家不出边界
+            player.position.x = Math.min(Math.max(player.position.x, -13.5), 13.5);
+
+            // 2. 球体翻滚动画 (旋转)
+            player.rotation.z -= tiltX * 0.1;
+            player.rotation.x -= speed * 0.2;
+
+            // 3. 场景向前推进 (障碍物和地面向后移动)
+            speed += 0.0001; // 逐渐加快速度
+            obstacles.forEach(obs => {
+                obs.position.z += speed;
+
+                // 当障碍物落到身后时，重新循环到前方
+                if (obs.position.z > camera.position.z) {
+                    obs.position.z = -1900;
+                    obs.position.x = (Math.random() - 0.5) * 26;
+                }
+            });
+
+            // 4. 更新相机位置，跟随玩家
+            camera.position.x = player.position.x * 0.5;
+            camera.position.y = player.position.y + 4;
+            camera.position.z = player.position.z + 8;
+            camera.lookAt(player.position.x, player.position.y, player.position.z - 5);
+
+            // 5. 更新分数 UI
+            score += speed;
+            document.getElementById('score').innerText = Math.floor(score);
+            document.getElementById('speed').innerText = Math.floor(speed * 100);
+
+            // 6. 碰撞检测
+            checkCollisions();
+
+            // 7. 渲染
+            renderer.render(scene, camera);
+        }
+
+        // 初始化页面
+        init();
+
+        // 按钮点击事件
+        document.getElementById('btn-start').addEventListener('click', requestGyroPermission);
+    </script>
+</body>
+</html>
